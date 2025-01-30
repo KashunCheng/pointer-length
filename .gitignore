@@ -30,3 +30,9 @@
 *.exe
 *.out
 *.app
+
+test/resources/*.ll
+!test/resources/*.out
+.idea
+# Any folder has "build" in its name
+*build*/

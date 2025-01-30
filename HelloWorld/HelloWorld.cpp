@@ -20,6 +20,7 @@
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Support/FormatVariadic.h"
 
 using namespace llvm;
 
@@ -32,8 +33,11 @@ namespace {
 
 // This method implements what the pass does
 void visitor(Function &F) {
-    errs() << "(llvm-tutor) Hello from: "<< F.getName() << "\n";
-    errs() << "(llvm-tutor)   number of arguments: " << F.arg_size() << "\n";
+  for (auto &B : F) {
+    for (auto &I : B) {
+      errs() << formatv("{0,-40}\n", I);
+    }
+  }
 }
 
 // New PM implementation
