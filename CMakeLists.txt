@@ -5,7 +5,7 @@ project(llvm-tutor)
 # 1. VERIFY LLVM INSTALLATION DIR
 # This is just a bit of a sanity checking.
 #===============================================================================
-set(LT_LLVM_INSTALL_DIR "" CACHE PATH "LLVM installation directory")
+set(LT_LLVM_INSTALL_DIR "$ENV{LT_LLVM_INSTALL_DIR}" CACHE PATH "LLVM installation directory")
 
 # 1.1 Check the "include" directory
 set(LT_LLVM_INCLUDE_DIR "${LT_LLVM_INSTALL_DIR}/include/llvm")
@@ -81,6 +81,11 @@ set(CMAKE_CXX_STANDARD 17 CACHE STRING "")
 if (NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Debug CACHE
       STRING "Build type (default Debug):" FORCE)
+endif()
+
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+  SET(CMAKE_CXX_FLAGS "-O0")
+  SET(CMAKE_C_FLAGS "-O0")
 endif()
 
 # Compiler flags
