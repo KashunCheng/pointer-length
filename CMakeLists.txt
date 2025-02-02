@@ -83,10 +83,25 @@ if (NOT CMAKE_BUILD_TYPE)
       STRING "Build type (default Debug):" FORCE)
 endif()
 
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-  SET(CMAKE_CXX_FLAGS "-O0 -femit-all-decls")
-  SET(CMAKE_C_FLAGS "-O0 -femit-all-decls")
-endif()
+if (CMAKE_BUILD_TYPE STREQUAL "Debug")
+    include(CheckCXXCompilerFlag)
+    check_cxx_compiler_flag("-femit-all-decls" SUPPORTS_EMIT_ALL_DECLS_FLAG)
+    if (SUPPORTS_EMIT_ALL_DECLS_FLAG)
+        SET(CMAKE_CXX_FLAGS "-O0 -femit-all-decls")
+        SET(CMAKE_C_FLAGS "-O0 -femit-all-decls")
+    else ()
+        check_cxx_compiler_flag("-fkeep-inline-functions" SUPPORTS_KEEP_INLINE_FUNCTIONS_FLAG)
+        if (SUPPORTS_KEEP_INLINE_FUNCTIONS_FLAG)
+            SET(CMAKE_CXX_FLAGS "-O0 -fkeep-inline-functions")
+            SET(CMAKE_C_FLAGS "-O0 -fkeep-inline-functions")
+        endif ()
+    endif ()
+    if (SUPPORTS_EMIT_ALL_DECLS_FLAG OR SUPPORTS_KEEP_INLINE_FUNCTIONS_FLAG)
+        message(WARNING "All symbols are kept for debugging purposes, but may cause linking and runtime errors.\
+      If you encounter such errors, please run CMake with Release build type. For example: \
+      cmake -DCMAKE_BUILD_TYPE=Release ..")
+    endif ()
+endif ()
 
 # Compiler flags
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall\
@@ -102,7 +117,7 @@ endif()
 # builds fine). For consistency, add it here too.
 include(CheckCXXCompilerFlag)
 check_cxx_compiler_flag("-fvisibility-inlines-hidden" SUPPORTS_FVISIBILITY_INLINES_HIDDEN_FLAG)
-if (${SUPPORTS_FVISIBILITY_INLINES_HIDDEN_FLAG} EQUAL "1")
+if (SUPPORTS_FVISIBILITY_INLINES_HIDDEN_FLAG)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fvisibility-inlines-hidden")
 endif()
 

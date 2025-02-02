@@ -21,6 +21,6 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: nicknovitski/nix-develop@v1
       - name: Build project
-        run: mkdir build && cd build && cmake .. && cmake --build .
+        run: mkdir build && cd build && cmake -DCMAKE_BUILD_TYPE=Release .. && cmake --build .
       - name: Run `pytest`
         run: pytest

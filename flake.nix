@@ -15,20 +15,31 @@
       in
       with pkgs;
       {
-        devShells.default = let llvm = llvmPackages_19.libllvm; in
+        devShells.default =
+          let
+            clang = llvmPackages_19.clang;
+            gcc = gcc14;
+            llvm = llvmPackages_19.libllvm;
+          in
           mkShell {
             buildInputs = [
-              llvm
-              graphviz
+              clang
               cmake
+              llvm
               (python3.withPackages (python-pkgs: with python-pkgs; [
                 pytest
               ]))
-            ];
+            ] ++ lib.optional stdenv.isLinux gcc;
             shellHook =
               ''
                 export LT_LLVM_INSTALL_DIR="${llvm.dev.outPath}"
-              '';
+              '' + (if stdenv.isLinux then ''
+                export CC="${gcc}/bin/gcc"
+                export CXX="${gcc}/bin/g++"
+              '' else ''
+                export CC="${clang}/bin/clang"
+                export CXX="${clang}/bin/clang++"
+              '');
           };
         formatter = nixpkgs-fmt;
       }
