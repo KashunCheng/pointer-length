@@ -84,8 +84,8 @@ if (NOT CMAKE_BUILD_TYPE)
 endif()
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-  SET(CMAKE_CXX_FLAGS "-O0")
-  SET(CMAKE_C_FLAGS "-O0")
+  SET(CMAKE_CXX_FLAGS "-O0 -femit-all-decls")
+  SET(CMAKE_C_FLAGS "-O0 -femit-all-decls")
 endif()
 
 # Compiler flags

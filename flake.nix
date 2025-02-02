@@ -15,20 +15,21 @@
       in
       with pkgs;
       {
-        devShells.default = mkShell {
-          buildInputs = [
-            llvmPackages_19.libllvm
-            graphviz
-            cmake
-            (python3.withPackages (python-pkgs: with python-pkgs; [
-              pytest
-            ]))
-          ];
-          shellHook =
-            ''
-              export LT_LLVM_INSTALL_DIR="${llvmPackages_19.libllvm.dev.outPath}"
-            '';
-        };
+        devShells.default = let llvm = llvmPackages_19.libllvm; in
+          mkShell {
+            buildInputs = [
+              llvm
+              graphviz
+              cmake
+              (python3.withPackages (python-pkgs: with python-pkgs; [
+                pytest
+              ]))
+            ];
+            shellHook =
+              ''
+                export LT_LLVM_INSTALL_DIR="${llvm.dev.outPath}"
+              '';
+          };
         formatter = nixpkgs-fmt;
       }
     );
