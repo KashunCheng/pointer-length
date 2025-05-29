@@ -1,4 +1,4 @@
-int test(int b, int* a)
+int test(int* a, int b)
 {
   int r = 0;
   for(int i = 0; i < b; i++)
@@ -8,9 +8,14 @@ int test(int b, int* a)
   return r;
 }
 
-int main(int argc, char** argv) {
+int main() {
   int a[5] = {1, 2, 3, 4, 5};
   int b = 5;
-  int result = test(b, a);
+  int result;
+  if (b==5) {
+    result = test(a, b);
+  } else {
+    result = test(a+1, b-1);
+  }
   return result;
 }

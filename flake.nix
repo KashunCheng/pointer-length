@@ -2,7 +2,7 @@
   description = "A environment for cs201 project2";
 
   inputs = {
-    nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-unstable";
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-25.05";
     flake-utils.url = "github:numtide/flake-utils";
   };
 
@@ -23,9 +23,14 @@
           in
           mkShell {
             buildInputs = [
+              boost
               clang
               cmake
               llvm
+              pkg-config
+              cpptrace
+              (z3.dev)
+              (z3.lib)
               (python3.withPackages (python-pkgs: with python-pkgs; [
                 pytest
               ]))

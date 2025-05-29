@@ -10,7 +10,8 @@ int test(int b, int* a)
 
 int main(int argc, char** argv) {
   int a[5] = {1, 2, 3, 4, 5};
-  int b = 5;
-  int result = test(b, a);
+  int b = 1;
+  int c = 4;
+  int result = test(b + c, a);
   return result;
 }

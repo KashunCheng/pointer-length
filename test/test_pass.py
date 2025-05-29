@@ -10,12 +10,16 @@ resource_dir = os.path.join(test_dir, "resources")
 
 def compile_c(filename):
     ir_filename = os.path.splitext(filename)[0] + '.ll'
-    if os.path.exists(os.path.join(resource_dir, ir_filename)):
+    out = os.path.join(resource_dir, ir_filename)
+    if os.path.exists(out):
         return
     # Run clang -S -fno-discard-value-names -emit-llvm test.c -o test.ll for the source file
     subprocess.run(
-        ['clang', '-O0', '-S', '-fno-discard-value-names', '-emit-llvm', os.path.join(resource_dir, filename), '-o',
-         os.path.join(resource_dir, ir_filename)])
+        ['clang', '-O0', '-S', '-emit-llvm', '-Xclang', '-disable-O0-optnone',
+         os.path.join(resource_dir, filename), '-o', out])
+    subprocess.run(
+        ['opt', '-passes=mem2reg', out, '-S', '-o', out]
+    )
 
 
 def find_pass_plugin():
@@ -27,7 +31,7 @@ def find_pass_plugin():
     return pass_plugin[0]
 
 
-@pytest.mark.parametrize("filename", filter(lambda x: x.endswith('.c'), os.listdir(resource_dir)))
+@pytest.mark.parametrize("filename", map(lambda x: pytest.param(x, id=x), filter(lambda x: x.endswith('.c'), os.listdir(resource_dir))))
 def test_pass(filename):
     compile_c(filename)
     expected = os.path.splitext(filename)[0] + '.out'
@@ -37,6 +41,7 @@ def test_pass(filename):
     # Run opt -load-pass-plugin PATH_TO_THE_PLUGIN -passes=hello-world -disable-output demo.ll
     pass_plugin = find_pass_plugin()
     # Check if the result from stderr matches the expected result
-    result = subprocess.run(['opt', '-load-pass-plugin', pass_plugin, '-passes=hello-world', '-disable-output',
+    result = subprocess.run(['opt', '-load-pass-plugin', pass_plugin, '-passes=hello-world', '-disable-output', '-func=test',
                              os.path.join(resource_dir, os.path.splitext(filename)[0] + '.ll')], capture_output=True)
-    assert result.stderr.decode('utf-8') == expected
+    print(result.stdout.decode('utf-8'))
+    assert result.stdout.decode('utf-8') == expected

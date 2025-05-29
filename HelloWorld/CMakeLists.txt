@@ -33,9 +33,29 @@ endif()
 #===============================================================================
 # 3. ADD THE TARGET
 #===============================================================================
-add_library(HelloWorld SHARED HelloWorld.cpp)
+add_library(HelloWorld SHARED HelloWorld.cpp
+        PointerDefResolution.cpp
+        PointerDefResolution.h
+        ReversedCallGraph.cpp
+        ReversedCallGraph.h
+        Z3ConstraintSolver.cpp
+        Z3ConstraintSolver.h
+)
 
+find_package(Boost REQUIRED COMPONENTS graph)
+find_package(Z3 REQUIRED)
+find_package(cpptrace REQUIRED)
+target_include_directories(
+    HelloWorld
+    PUBLIC
+    ${Boost_INCLUDE_DIRS}
+    ${Z3_INCLUDE_DIR}
+    cpptrace::cpptrace
+)
 # Allow undefined symbols in shared objects on Darwin (this is the default
 # behaviour on Linux)
 target_link_libraries(HelloWorld
-  "$<$<PLATFORM_ID:Darwin>:-undefined dynamic_lookup>")
+  "$<$<PLATFORM_ID:Darwin>:-undefined dynamic_lookup>"
+  Boost::graph
+  ${Z3_LIBRARIES}
+  cpptrace::cpptrace)

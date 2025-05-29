@@ -16,16 +16,15 @@
 //
 // License: MIT
 //=============================================================================
-#include "llvm/IR/LegacyPassManager.h"
+#include "PointerDefResolution.h"
+#include "ReversedCallGraph.h"
+
+#include "llvm/Analysis/CallGraph.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
-#include "llvm/Support/FormatVariadic.h"
-#include "llvm/Support/raw_ostream.h"
-#include <filesystem>
 
 using namespace llvm;
-using std::make_tuple;
 //-----------------------------------------------------------------------------
 // HelloWorld implementation
 //-----------------------------------------------------------------------------
@@ -33,101 +32,52 @@ using std::make_tuple;
 // everything in an anonymous namespace.
 namespace {
 
-// This method implements what the pass does
-void visitor(Function &F) {
-  int id = 0;
-  DenseMap<Value *, int> valueToId;
-  StringMap<int> exprToId;
-
-  auto createValue = [&](Value *value) {
-    auto it = valueToId.find(value);
-    if (it != valueToId.end()) {
-      return make_tuple(it->getSecond(), true);
-    }
-    id++;
-    valueToId[value] = id;
-    return make_tuple(id, false);
-  };
-
-  auto createExpr = [&](StringRef expr) {
-    auto it = exprToId.find(expr);
-    if (it != exprToId.end()) {
-      return make_tuple(it->getValue(), true);
-    }
-    id++;
-    exprToId[expr] = id;
-    return make_tuple(id, false);
-  };
-
-  auto dupValue = [&]<bool print = true>(int refValueId, Value *value) {
-    valueToId[value] = refValueId;
-    if (print) {
-      errs() << formatv("{0} = {0}", refValueId);
-    }
-  };
-
-  auto evaluateExpr = [&](Value *lhs, StringRef rhs) {
-    const auto [refExprId, exprRedundant] = createExpr(rhs);
-    errs() << formatv("{0} = {1}", refExprId, rhs);
-    if (exprRedundant) {
-      errs() << " (redundant)";
-    }
-    dupValue.template operator()<false>(refExprId, lhs);
-  };
-
-  for (auto &B : F) {
-    for (auto &I : B) {
-      if (dyn_cast<AllocaInst>(&I) || dyn_cast<ReturnInst>(&I)) {
-        continue;
-      }
-      errs() << formatv("{0,-40}", I);
-      if (auto *SI = dyn_cast<StoreInst>(&I)) {
-        const auto valueId = get<0>(createValue(SI->getValueOperand()));
-        dupValue(valueId, SI->getPointerOperand());
-      } else if (auto *LI = dyn_cast<LoadInst>(&I)) {
-        const auto ptrId = get<0>(createValue(LI->getPointerOperand()));
-        dupValue(ptrId, LI);
-      } else if (I.isBinaryOp()) {
-        assert(I.getOpcode() == Instruction::Add ||
-               I.getOpcode() == Instruction::Sub ||
-               I.getOpcode() == Instruction::Mul ||
-               I.getOpcode() == Instruction::SDiv ||
-               I.getOpcode() == Instruction::UDiv);
-        const auto op0 = I.getOperand(0);
-        const auto op1 = I.getOperand(1);
-        const auto op0Id = get<0>(createValue(op0));
-        const auto op1Id = get<0>(createValue(op1));
-        const auto exprName = I.getOpcodeName();
-        const auto expr = formatv("{0} {1} {2}", op0Id, exprName, op1Id).str();
-        evaluateExpr(&I, expr);
-      }
-      errs() << "\n";
-    }
-  }
-}
+cl::opt<std::string>
+    TargetFuncName("func", cl::desc("Name of the function to trace"),
+                   cl::value_desc("function name"), cl::init(""));
 
 // New PM implementation
 struct HelloWorld : PassInfoMixin<HelloWorld> {
   // Main entry point, takes IR unit to run the pass on (&F) and the
   // corresponding pass manager (to be queried if need be)
-  PreservedAnalyses run(Function &F, FunctionAnalysisManager &) {
-    errs() << "ValueNumbering: ";
-    const auto M = F.getParent();
-    try {
-      const auto stem = std::filesystem::path(M->getSourceFileName()).stem();
-      errs() << stem;
-    } catch (std::exception &e) {
-      errs() << "<unknown>";
+  [[maybe_unused]] static PreservedAnalyses run(Module &M,
+                                                ModuleAnalysisManager &MAM) {
+    // 1) Build/get the CallGraph:
+    const CallGraph &CG = MAM.getResult<CallGraphAnalysis>(M);
+    const ReversedCallGraph RCG(CG);
+    // 2) Find the node for your "interesting" Function:
+    const Function *F = M.getFunction(TargetFuncName);
+    if (!F) {
+      errs() << "ERROR: no function called '" << TargetFuncName
+             << "' in module\n";
+      return PreservedAnalyses::all();
     }
-    errs() << '\n';
-    visitor(F);
+    ParamsInfo PI;
+    for (auto &arg:F->args()) {
+      if (arg.getType()->isPointerTy() || arg.getType()->isArrayTy()) {
+        PI.PointerIndices.push_back(arg.getArgNo());
+      }else if (arg.getType()->isIntegerTy()) {
+        PI.IntegerIndices.push_back(arg.getArgNo());
+      }
+    }
+    if (PI.PointerIndices.empty()) {
+      errs() << "ERROR: no pointer argument in function '" << TargetFuncName
+             << "'\n";
+      return PreservedAnalyses::all();
+    }
+    if (PI.IntegerIndices.empty()) {
+      errs() << "ERROR: no integer argument in function '" << TargetFuncName
+             << "'\n";
+      return PreservedAnalyses::all();
+    }
+    PointerDefResolution(CG, RCG, F, PI);
     return PreservedAnalyses::all();
   }
 
   // Without isRequired returning true, this pass will be skipped for functions
   // decorated with the optnone LLVM attribute. Note that clang -O0 decorates
   // all functions with optnone.
-  static bool isRequired() { return true; }
+  [[maybe_unused]] static bool isRequired() { return true; }
 };
 } // namespace
 
@@ -138,10 +88,10 @@ llvm::PassPluginLibraryInfo getHelloWorldPluginInfo() {
   return {LLVM_PLUGIN_API_VERSION, "HelloWorld", LLVM_VERSION_STRING,
           [](PassBuilder &PB) {
             PB.registerPipelineParsingCallback(
-                [](StringRef Name, FunctionPassManager &FPM,
+                [](StringRef Name, ModulePassManager &MPM,
                    ArrayRef<PassBuilder::PipelineElement>) {
                   if (Name == "hello-world") {
-                    FPM.addPass(HelloWorld());
+                    MPM.addPass(HelloWorld());
                     return true;
                   }
                   return false;
