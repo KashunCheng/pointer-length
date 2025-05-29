@@ -25,21 +25,23 @@ SolverResult AnalyzeCB(Z3ConstraintSolver &Ctx, const CallBase *CB,
   CB->dump();
 #endif
   solver &Solver = Ctx.solver;
-  const Value *InterestingPtr = CB->getOperand(PtrIndex);
-  const Value *InterestingInteger = CB->getOperand(IntegerIndex);
-  const Value *Ptr = InterestingPtr;
-  const Value *Integer = InterestingInteger;
+  const Value *InitialPtr = CB->getOperand(PtrIndex);
+  const Value *InitialInteger = CB->getOperand(IntegerIndex);
+  DenseSet<const Value *> InterestingPtrs;
+  InterestingPtrs.insert(InitialPtr);
+  DenseSet<const Value *> InterestingIntegers;
+  InterestingIntegers.insert(InitialInteger);
+
   DenseMap<const Value *, expr> PtrToExpr;
   DenseMap<const Value *, expr> IntegerToExpr;
 
-  PtrToExpr.insert(std::make_pair(Ptr, Ctx.ptr_const(Ptr)));
-  IntegerToExpr.insert(std::make_pair(Integer, Ctx.int_const(Integer)));
-  auto &CurrentPtrExpr = PtrToExpr.find(Ptr)->getSecond();
-  auto &CurrentIntegerExpr = IntegerToExpr.find(Integer)->getSecond();
+  PtrToExpr.insert(std::make_pair(InitialPtr, Ctx.ptr_const(InitialPtr)));
+  IntegerToExpr.insert(std::make_pair(InitialInteger, Ctx.int_const(InitialInteger)));
+
   for (auto I = CB->getPrevNonDebugInstruction(); I != nullptr;
        I = I->getPrevNonDebugInstruction()) {
     if (auto *GEP = dyn_cast<GetElementPtrInst>(I)) {
-      if (GEP != Ptr) {
+      if (!InterestingPtrs.contains(GEP)) {
         continue;
       }
       if (!GEP->isInBounds()) {
@@ -51,7 +53,11 @@ SolverResult AnalyzeCB(Z3ConstraintSolver &Ctx, const CallBase *CB,
       if (GEP->getNumIndices() == 0) {
         todo();
       }
+      const auto CurrentPtrExpr = PtrToExpr.find(GEP)->second;
       const auto GEPOffset = (GEP->indices().end() - 1)->get();
+      if (!llvm::isa<llvm::ConstantInt>(GEPOffset)) {
+        InterestingIntegers.insert(GEPOffset);
+      }
       if (!IntegerToExpr.contains(GEPOffset)) {
         IntegerToExpr.insert(
             std::make_pair(GEPOffset, Ctx.int_const(GEPOffset)));
@@ -69,12 +75,13 @@ SolverResult AnalyzeCB(Z3ConstraintSolver &Ctx, const CallBase *CB,
                  Ctx.length(GEPFromPtrExpr) - GEPOffsetExpr);
       Solver.add(Ctx.capacity(CurrentPtrExpr) ==
                  Ctx.capacity(GEPFromPtrExpr) - GEPOffsetExpr);
-      Ptr = GEPFromPtr;
-      CurrentPtrExpr = GEPFromPtrExpr;
+      InterestingPtrs.insert(GEPFromPtr);
+      InterestingPtrs.erase(GEP);
     } else if (auto *AI = dyn_cast<AllocaInst>(I)) {
-      if (AI != Ptr) {
+      if (!InterestingPtrs.contains(AI)) {
         continue;
       }
+      const auto CurrentPtrExpr = PtrToExpr.find(AI)->second;
       const auto AllocaType = AI->getAllocatedType();
       if (const auto AT = dyn_cast<llvm::ArrayType>(AllocaType)) {
         if (AT->getArrayElementType()->isArrayTy()) {
@@ -86,10 +93,10 @@ SolverResult AnalyzeCB(Z3ConstraintSolver &Ctx, const CallBase *CB,
         todo();
       }
     } else if (auto *BO = dyn_cast<BinaryOperator>(I)) {
-      if (BO != Ptr && BO != Integer) {
+      if (BO != InitialPtr && BO != InitialInteger) {
         continue;
       }
-      if (BO == Ptr) {
+      if (BO == InitialPtr) {
         todo();
         continue;
       }
@@ -101,7 +108,7 @@ SolverResult AnalyzeCB(Z3ConstraintSolver &Ctx, const CallBase *CB,
         todo();
       }
     } else {
-      if (I == Integer || I == Ptr) {
+      if (I == InitialInteger || I == InitialPtr) {
         todo();
       }
     }
@@ -110,26 +117,26 @@ SolverResult AnalyzeCB(Z3ConstraintSolver &Ctx, const CallBase *CB,
   SolverResult result;
 
   Solver.push();
-  Solver.add(Ctx.capacity(PtrToExpr.find(InterestingPtr)->second) !=
-             IntegerToExpr.find(InterestingInteger)->second);
+  Solver.add(Ctx.capacity(PtrToExpr.find(InitialPtr)->second) !=
+             IntegerToExpr.find(InitialInteger)->second);
   result.IsCapacity = Solver.check() == unsat;
   Solver.pop();
 
   Solver.push();
-  Solver.add(Ctx.capacity(PtrToExpr.find(InterestingPtr)->second) <
-             IntegerToExpr.find(InterestingInteger)->second);
+  Solver.add(Ctx.capacity(PtrToExpr.find(InitialPtr)->second) <
+             IntegerToExpr.find(InitialInteger)->second);
   result.LeqCapacity = Solver.check() == unsat;
   Solver.pop();
 
   Solver.push();
-  Solver.add(Ctx.length(PtrToExpr.find(InterestingPtr)->second) !=
-             IntegerToExpr.find(InterestingInteger)->second);
+  Solver.add(Ctx.length(PtrToExpr.find(InitialPtr)->second) !=
+             IntegerToExpr.find(InitialInteger)->second);
   result.IsLength = Solver.check() == unsat;
   Solver.pop();
 
   Solver.push();
-  Solver.add(Ctx.length(PtrToExpr.find(InterestingPtr)->second) <
-             IntegerToExpr.find(InterestingInteger)->second);
+  Solver.add(Ctx.length(PtrToExpr.find(InitialPtr)->second) <
+             IntegerToExpr.find(InitialInteger)->second);
   result.LeqLength = Solver.check() == unsat;
   Solver.pop();
 

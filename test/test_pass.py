@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 from glob import glob
@@ -33,6 +34,10 @@ def find_pass_plugin():
 
 @pytest.mark.parametrize("filename", map(lambda x: pytest.param(x, id=x), filter(lambda x: x.endswith('.c'), os.listdir(resource_dir))))
 def test_pass(filename):
+    with open( os.path.join(resource_dir, filename)) as f:
+        line = f.readline()
+        line = line.removeprefix('//').strip()
+        func = json.loads(line)["func"]
     compile_c(filename)
     expected = os.path.splitext(filename)[0] + '.out'
     assert os.path.exists(os.path.join(resource_dir, expected))
@@ -41,7 +46,7 @@ def test_pass(filename):
     # Run opt -load-pass-plugin PATH_TO_THE_PLUGIN -passes=hello-world -disable-output demo.ll
     pass_plugin = find_pass_plugin()
     # Check if the result from stderr matches the expected result
-    result = subprocess.run(['opt', '-load-pass-plugin', pass_plugin, '-passes=hello-world', '-disable-output', '-func=test',
+    result = subprocess.run(['opt', '-load-pass-plugin', pass_plugin, '-passes=hello-world', '-disable-output', f'-func={func}',
                              os.path.join(resource_dir, os.path.splitext(filename)[0] + '.ll')], capture_output=True)
     print(result.stdout.decode('utf-8'))
     assert result.stdout.decode('utf-8') == expected

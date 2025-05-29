@@ -1,3 +1,4 @@
+//{"func": "test"}
 int test(int b, int* a)
 {
   int r = 0;

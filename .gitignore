@@ -33,6 +33,7 @@
 
 test/resources/*.ll
 !test/resources/*.out
+!test/resources/disabled/*.out
 .idea
 # Any folder has "build" in its name
 *build*/
