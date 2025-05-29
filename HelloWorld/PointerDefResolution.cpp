@@ -3,6 +3,7 @@
 //
 
 #include "PointerDefResolution.h"
+#include "llvm/IR/GetElementPtrTypeIterator.h"
 #include <numeric>
 
 using llvm::BinaryOperator;
@@ -15,6 +16,75 @@ using z3::expr;
 constexpr int max_depth = 1;
 
 void TaintReturnValueAnalysis(const Function *F) { assert(F != nullptr); }
+
+static bool IsValueConstantInt(const Value *V) {
+  return llvm::isa<llvm::ConstantInt>(V);
+}
+
+bool Z3AccumulateConstantOffset(Z3ConstraintSolver &Ctx, llvm::Type *SourceType,
+                                llvm::ArrayRef<const Value *> Index,
+                                const llvm::DataLayout &DL, expr &Offset) {
+  Offset = Ctx.int_const(uint64_t(0));
+
+  // Fast path for canonical getelementptr i8 form.
+  if (SourceType->isIntegerTy(8) && !Index.empty()) {
+    auto *CI = dyn_cast<llvm::ConstantInt>(Index.front());
+    if (CI && CI->getType()->isIntegerTy()) {
+      Offset = Offset + Ctx.int_const(CI->getValue().getZExtValue());
+      return true;
+    }
+    todo();
+    return false;
+  }
+
+  auto AccumulateOffset = [&](uint64_t Index, uint64_t Size) -> bool {
+    Offset = Offset + Ctx.int_const(Index * Size);
+    return true;
+  };
+
+  auto begin = llvm::generic_gep_type_iterator<decltype(Index.begin())>::begin(
+      SourceType, Index.begin());
+  auto end =
+      llvm::generic_gep_type_iterator<decltype(Index.end())>::end(Index.end());
+  for (auto GTI = begin, GTE = end; GTI != GTE; ++GTI) {
+    // Scalable vectors are multiplied by a runtime constant.
+    bool ScalableType = GTI.getIndexedType()->isScalableTy();
+
+    Value *V = GTI.getOperand();
+    llvm::StructType *STy = GTI.getStructTypeOrNull();
+    // Handle ConstantInt if possible.
+    auto *ConstOffset = dyn_cast<llvm::ConstantInt>(V);
+    if (ConstOffset && ConstOffset->getType()->isIntegerTy()) {
+      if (ConstOffset->isZero())
+        continue;
+      // if the type is scalable and the constant is not zero (vscale * n * 0 =
+      // 0) bailout.
+      if (ScalableType) {
+        todo();
+      }
+      // Handle a struct index, which adds its field offset to the pointer.
+      if (STy) {
+        unsigned ElementIdx = ConstOffset->getZExtValue();
+        const llvm::StructLayout *SL = DL.getStructLayout(STy);
+        // Element offset is in bytes.
+        if (SL->getElementOffset(ElementIdx).isScalable()) {
+          todo();
+        }
+        if (!AccumulateOffset(SL->getElementOffset(ElementIdx).getFixedValue(),
+                              1))
+          return false;
+        continue;
+      }
+      if (!AccumulateOffset(ConstOffset->getValue().getZExtValue(),
+                            GTI.getSequentialElementStride(DL)))
+        return false;
+      continue;
+    } else {
+      todo();
+    }
+  }
+  return true;
+}
 
 SolverResult AnalyzeCB(Z3ConstraintSolver &Ctx, const CallBase *CB,
                        unsigned PtrIndex, unsigned IntegerIndex) {
@@ -32,43 +102,27 @@ SolverResult AnalyzeCB(Z3ConstraintSolver &Ctx, const CallBase *CB,
   DenseSet<const Value *> InterestingIntegers;
   InterestingIntegers.insert(InitialInteger);
 
-  DenseMap<const Value *, expr> PtrToExpr;
-  DenseMap<const Value *, expr> IntegerToExpr;
-
-  PtrToExpr.insert(std::make_pair(InitialPtr, Ctx.ptr_const(InitialPtr)));
-  IntegerToExpr.insert(std::make_pair(InitialInteger, Ctx.int_const(InitialInteger)));
-
   for (auto I = CB->getPrevNonDebugInstruction(); I != nullptr;
        I = I->getPrevNonDebugInstruction()) {
+    I->dump();
     if (auto *GEP = dyn_cast<GetElementPtrInst>(I)) {
       if (!InterestingPtrs.contains(GEP)) {
         continue;
       }
-      if (!GEP->isInBounds()) {
-        todo();
-      }
-      if (GEP->indices().end() - GEP->indices().begin() != 2) {
-        todo();
-      }
       if (GEP->getNumIndices() == 0) {
         todo();
       }
-      const auto CurrentPtrExpr = PtrToExpr.find(GEP)->second;
-      const auto GEPOffset = (GEP->indices().end() - 1)->get();
-      if (!llvm::isa<llvm::ConstantInt>(GEPOffset)) {
-        InterestingIntegers.insert(GEPOffset);
+      const auto CurrentPtrExpr = Ctx.ptr_const(GEP);
+      expr GEPOffsetExpr(Ctx.context);
+      {
+        SmallVector<const Value *> Indices(
+            llvm::drop_begin(GEP->operand_values()));
+        Z3AccumulateConstantOffset(Ctx, GEP->getSourceElementType(), Indices,
+                                   GEP->getDataLayout(), GEPOffsetExpr);
       }
-      if (!IntegerToExpr.contains(GEPOffset)) {
-        IntegerToExpr.insert(
-            std::make_pair(GEPOffset, Ctx.int_const(GEPOffset)));
-      }
-      const auto &GEPOffsetExpr = IntegerToExpr.find(GEPOffset)->getSecond();
 
       const auto GEPFromPtr = GEP->getPointerOperand();
-      if (!PtrToExpr.contains(GEPFromPtr)) {
-        PtrToExpr.insert(std::make_pair(GEPFromPtr, Ctx.ptr_const(GEPFromPtr)));
-      }
-      const auto &GEPFromPtrExpr = PtrToExpr.find(GEPFromPtr)->getSecond();
+      const auto &GEPFromPtrExpr = Ctx.ptr_const(GEPFromPtr);
       Solver.add(Ctx.addr(CurrentPtrExpr) ==
                  Ctx.addr(GEPFromPtrExpr) + GEPOffsetExpr);
       Solver.add(Ctx.length(CurrentPtrExpr) ==
@@ -81,7 +135,7 @@ SolverResult AnalyzeCB(Z3ConstraintSolver &Ctx, const CallBase *CB,
       if (!InterestingPtrs.contains(AI)) {
         continue;
       }
-      const auto CurrentPtrExpr = PtrToExpr.find(AI)->second;
+      const auto CurrentPtrExpr = Ctx.ptr_const(AI);
       const auto AllocaType = AI->getAllocatedType();
       if (const auto AT = dyn_cast<llvm::ArrayType>(AllocaType)) {
         if (AT->getArrayElementType()->isArrayTy()) {
@@ -93,50 +147,96 @@ SolverResult AnalyzeCB(Z3ConstraintSolver &Ctx, const CallBase *CB,
         todo();
       }
     } else if (auto *BO = dyn_cast<BinaryOperator>(I)) {
-      if (BO != InitialPtr && BO != InitialInteger) {
-        continue;
-      }
-      if (BO == InitialPtr) {
-        todo();
+      if (!InterestingIntegers.contains(BO)) {
         continue;
       }
       switch (BO->getOpcode()) {
       case BinaryOperator::Add:
+      case BinaryOperator::Sub:
+        {
+        const auto *left = BO->getOperand(0);
+        const auto leftExpr = Ctx.int_const(left);
+        const auto *right = BO->getOperand(1);
+        const auto rightExpr = Ctx.int_const(right);
+        const auto &BOExpr = Ctx.int_const(BO);
+        switch (BO->getOpcode()) {
+          case BinaryOperator::Add: {
+            Solver.add(BOExpr == leftExpr + rightExpr);
+            break;
+          }
+          case BinaryOperator::Sub: {
+            Solver.add(BOExpr == leftExpr - rightExpr);
+            break;
+          }
+          default:
+          todo();
+        }
+        if (!IsValueConstantInt(left)) {
+          InterestingIntegers.insert(left);
+        }
+        if (!IsValueConstantInt(right)) {
+          InterestingIntegers.insert(right);
+        }
+        InterestingIntegers.erase(BO);
+        break;
+      }
 
       default:
-        llvm::errs() << "Unhandled BinaryOperator " << BO->getOpcodeName() << "\n";
+        llvm::errs() << "Unhandled BinaryOperator " << BO->getOpcodeName()
+                     << "\n";
         todo();
       }
-    } else {
-      if (I == InitialInteger || I == InitialPtr) {
+    } else if (auto *TI = dyn_cast<llvm::TruncInst>(I)) {
+      if (!InterestingIntegers.contains(TI)) {
+        continue;
+      }
+      const auto *old = TI->getOperand(0);
+      const auto oldExpr = Ctx.int_const(old);
+      if (!IsValueConstantInt(old)) {
+        InterestingIntegers.insert(old);
+      }
+      Solver.add(oldExpr == Ctx.int_const(TI));
+      InterestingIntegers.erase(TI);
+    } else if (auto *PTII = dyn_cast<llvm::PtrToIntInst>(I)) {
+      if (!InterestingIntegers.contains(PTII)) {
+        continue;
+      }
+      const auto *old = PTII->getOperand(0);
+      const auto oldExpr = Ctx.ptr_const(old);
+      Solver.add(Ctx.addr(oldExpr) == Ctx.int_const(PTII));
+      InterestingIntegers.erase(PTII);
+      InterestingPtrs.insert(old);
+    }  else {
+      if (InterestingIntegers.contains(I) || InterestingPtrs.contains(I)) {
+        I->dump();
         todo();
       }
     }
   }
 
   SolverResult result;
-
+  llvm::errs() << Solver.to_smt2() << '\n';
   Solver.push();
-  Solver.add(Ctx.capacity(PtrToExpr.find(InitialPtr)->second) !=
-             IntegerToExpr.find(InitialInteger)->second);
+  Solver.add(Ctx.capacity(Ctx.ptr_const(InitialPtr)) !=
+             Ctx.int_const(InitialInteger));
   result.IsCapacity = Solver.check() == unsat;
   Solver.pop();
 
   Solver.push();
-  Solver.add(Ctx.capacity(PtrToExpr.find(InitialPtr)->second) <
-             IntegerToExpr.find(InitialInteger)->second);
+  Solver.add(Ctx.capacity(Ctx.ptr_const(InitialPtr)) <
+             Ctx.int_const(InitialInteger));
   result.LeqCapacity = Solver.check() == unsat;
   Solver.pop();
 
   Solver.push();
-  Solver.add(Ctx.length(PtrToExpr.find(InitialPtr)->second) !=
-             IntegerToExpr.find(InitialInteger)->second);
+  Solver.add(Ctx.length(Ctx.ptr_const(InitialPtr)) !=
+             Ctx.int_const(InitialInteger));
   result.IsLength = Solver.check() == unsat;
   Solver.pop();
 
   Solver.push();
-  Solver.add(Ctx.length(PtrToExpr.find(InitialPtr)->second) <
-             IntegerToExpr.find(InitialInteger)->second);
+  Solver.add(Ctx.length(Ctx.ptr_const(InitialPtr)) <
+             Ctx.int_const(InitialInteger));
   result.LeqLength = Solver.check() == unsat;
   Solver.pop();
 

@@ -25,14 +25,16 @@ private:
   func_decl_vector ptr_proj;
   sort ptr_sort;
   DenseMap<const Value *, string> expr_names;
+  DenseMap<const Value *, expr> ptr_to_expr;
+  DenseMap<const Value *, expr> integer_to_expr;
 
   [[nodiscard]] const char *value_name(const Value *value) {
     assert(value != nullptr);
     if (expr_names.contains(value)) {
       return expr_names[value].c_str();
     }
-    auto [fst, _] = expr_names.insert(std::make_pair(
-        value, llvm::formatv("{0:x}", value).str()));
+    auto [fst, _] = expr_names.insert(
+        std::make_pair(value, llvm::formatv("{0:x}", value).str()));
     return fst->second.c_str();
   }
 
@@ -40,23 +42,43 @@ public:
   solver solver;
 
   explicit Z3ConstraintSolver();
-  [[nodiscard]] expr int_const(const Value *value) {
+  expr int_const(const Value *value) {
     assert(value != nullptr);
     if (const auto CI = dyn_cast<llvm::ConstantInt>(value)) {
       // assert(CI->getBitWidth() <= 32);
       return context.int_val(CI->getZExtValue());
     }
-    return context.int_const(value_name(value));
+    const auto it = integer_to_expr.find(value);
+    if (it == integer_to_expr.end()) {
+      auto expr = context.int_const(value_name(value));
+      integer_to_expr.insert(std::make_pair(value, expr));
+      return expr;
+    }
+    return it->second;
   }
 
-  [[nodiscard]] expr int_const(const uint64_t value) {
+  expr int_const(const uint64_t value) {
     return context.int_val(value);
   }
 
-  [[nodiscard]] expr int_val(const int value) { return context.int_val(value); }
+  // [[nodiscard]] expr int_val(const int value) { return context.int_val(value); }
 
-  [[nodiscard]] expr ptr_const(const Value *value) {
-    return context.constant(value_name(value), ptr_sort);
+  expr ptr_const(const Value *value) {
+    const auto it = ptr_to_expr.find(value);
+    if (it == ptr_to_expr.end()) {
+      auto expr = context.constant(value_name(value), ptr_sort);
+      ptr_to_expr.insert(std::make_pair(value, expr));
+      return expr;
+    }
+    return it->second;
+  }
+
+  bool contains_int_const(const Value *value) const {
+    return ptr_to_expr.contains(value);
+  }
+
+  bool contains_ptr_const(const Value *value) const {
+    return ptr_to_expr.contains(value);
   }
 
   [[nodiscard]] expr addr(const expr &ptr) const { return ptr_proj[0](ptr); }
