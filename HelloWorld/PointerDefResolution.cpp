@@ -206,7 +206,28 @@ SolverResult AnalyzeCB(Z3ConstraintSolver &Ctx, const CallBase *CB,
       Solver.add(Ctx.addr(oldExpr) == Ctx.int_const(PTII));
       InterestingIntegers.erase(PTII);
       InterestingPtrs.insert(old);
-    }  else {
+    } else if (auto *CI = dyn_cast<llvm::CallInst>(I)) {
+      const auto *Fn = CI->getCalledFunction();
+      if (Fn == nullptr) {
+        // indirect call
+        todo();
+      }
+      if (Fn->getName() == "strlen") {
+        if (!InterestingIntegers.contains(CI)) {
+          continue;
+        }
+        const auto *old = CI->getOperand(0);
+        const auto oldExpr = Ctx.ptr_const(old);
+        Solver.add(Ctx.length(oldExpr) == Ctx.int_const(CI));
+        InterestingIntegers.erase(CI);
+        InterestingPtrs.insert(old);
+        continue;
+      }
+      if (InterestingIntegers.contains(I) || InterestingPtrs.contains(I)) {
+        I->dump();
+        todo();
+      }
+    } else {
       if (InterestingIntegers.contains(I) || InterestingPtrs.contains(I)) {
         I->dump();
         todo();

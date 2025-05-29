@@ -68,6 +68,9 @@ public:
     if (it == ptr_to_expr.end()) {
       auto expr = context.constant(value_name(value), ptr_sort);
       ptr_to_expr.insert(std::make_pair(value, expr));
+      solver.add(context.int_val(0) <= addr(expr));
+      solver.add(0 <= length(expr));
+      solver.add(length(expr) <= capacity(expr));
       return expr;
     }
     return it->second;
