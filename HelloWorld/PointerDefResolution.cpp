@@ -86,24 +86,25 @@ bool Z3AccumulateConstantOffset(Z3ConstraintSolver &Ctx, llvm::Type *SourceType,
   return true;
 }
 
-SolverResult AnalyzeCB(Z3ConstraintSolver &Ctx, const CallBase *CB,
-                       unsigned PtrIndex, unsigned IntegerIndex) {
-  assert(CB != nullptr);
-#ifndef NDEBUG
-  llvm::errs() << "[PointerDefResolution] AnalyzeCB: " << CB->getName() << "\n";
-  llvm::errs() << "[PointerDefResolution] AnalyzeCB: ";
-  CB->dump();
-#endif
-  solver &Solver = Ctx.solver;
-  const Value *InitialPtr = CB->getOperand(PtrIndex);
-  const Value *InitialInteger = CB->getOperand(IntegerIndex);
-  DenseSet<const Value *> InterestingPtrs;
-  InterestingPtrs.insert(InitialPtr);
-  DenseSet<const Value *> InterestingIntegers;
-  InterestingIntegers.insert(InitialInteger);
+struct DominanceInfo {
+  SmallVector<expr> taken_exprs;
+  SmallVector<expr> not_taken_exprs;
+};
 
-  for (auto I = CB->getPrevNonDebugInstruction(); I != nullptr;
-       I = I->getPrevNonDebugInstruction()) {
+expr join_all(const SmallVector<expr> &exprs, Z3ConstraintSolver &Ctx) {
+  return std::reduce(exprs.begin(), exprs.end(), Ctx.bool_const(true),
+                     [](const expr &a, const expr &b) { return a && b; });
+}
+
+std::pair<SmallVector<expr>, const llvm::PHINode *>
+AnalyzeBB(Z3ConstraintSolver &Ctx, const llvm::Instruction *I,
+          DenseSet<const Value *> &InterestingPtrs,
+          DenseSet<const Value *> &InterestingIntegers,
+          std::optional<DominanceInfo> dominance_info) {
+  DenseSet<const Value *> InterestingBooleans;
+  SmallVector<expr> Results;
+  assert(I != nullptr);
+  for (; I != nullptr; I = I->getPrevNonDebugInstruction()) {
     I->dump();
     if (auto *GEP = dyn_cast<GetElementPtrInst>(I)) {
       if (!InterestingPtrs.contains(GEP)) {
@@ -123,12 +124,12 @@ SolverResult AnalyzeCB(Z3ConstraintSolver &Ctx, const CallBase *CB,
 
       const auto GEPFromPtr = GEP->getPointerOperand();
       const auto &GEPFromPtrExpr = Ctx.ptr_const(GEPFromPtr);
-      Solver.add(Ctx.addr(CurrentPtrExpr) ==
-                 Ctx.addr(GEPFromPtrExpr) + GEPOffsetExpr);
-      Solver.add(Ctx.length(CurrentPtrExpr) ==
-                 Ctx.length(GEPFromPtrExpr) - GEPOffsetExpr);
-      Solver.add(Ctx.capacity(CurrentPtrExpr) ==
-                 Ctx.capacity(GEPFromPtrExpr) - GEPOffsetExpr);
+      Results.push_back(Ctx.addr(CurrentPtrExpr) ==
+                        Ctx.addr(GEPFromPtrExpr) + GEPOffsetExpr);
+      Results.push_back(Ctx.length(CurrentPtrExpr) ==
+                        Ctx.length(GEPFromPtrExpr) - GEPOffsetExpr);
+      Results.push_back(Ctx.capacity(CurrentPtrExpr) ==
+                        Ctx.capacity(GEPFromPtrExpr) - GEPOffsetExpr);
       InterestingPtrs.insert(GEPFromPtr);
       InterestingPtrs.erase(GEP);
     } else if (auto *AI = dyn_cast<AllocaInst>(I)) {
@@ -141,8 +142,8 @@ SolverResult AnalyzeCB(Z3ConstraintSolver &Ctx, const CallBase *CB,
         if (AT->getArrayElementType()->isArrayTy()) {
           todo();
         }
-        Solver.add(Ctx.capacity(CurrentPtrExpr) ==
-                   Ctx.int_const(AT->getArrayNumElements()));
+        Results.push_back(Ctx.capacity(CurrentPtrExpr) ==
+                          Ctx.int_const(AT->getArrayNumElements()));
       } else {
         todo();
       }
@@ -152,23 +153,22 @@ SolverResult AnalyzeCB(Z3ConstraintSolver &Ctx, const CallBase *CB,
       }
       switch (BO->getOpcode()) {
       case BinaryOperator::Add:
-      case BinaryOperator::Sub:
-        {
+      case BinaryOperator::Sub: {
         const auto *left = BO->getOperand(0);
         const auto leftExpr = Ctx.int_const(left);
         const auto *right = BO->getOperand(1);
         const auto rightExpr = Ctx.int_const(right);
         const auto &BOExpr = Ctx.int_const(BO);
         switch (BO->getOpcode()) {
-          case BinaryOperator::Add: {
-            Solver.add(BOExpr == leftExpr + rightExpr);
-            break;
-          }
-          case BinaryOperator::Sub: {
-            Solver.add(BOExpr == leftExpr - rightExpr);
-            break;
-          }
-          default:
+        case BinaryOperator::Add: {
+          Results.push_back(BOExpr == leftExpr + rightExpr);
+          break;
+        }
+        case BinaryOperator::Sub: {
+          Results.push_back(BOExpr == leftExpr - rightExpr);
+          break;
+        }
+        default:
           todo();
         }
         if (!IsValueConstantInt(left)) {
@@ -195,7 +195,7 @@ SolverResult AnalyzeCB(Z3ConstraintSolver &Ctx, const CallBase *CB,
       if (!IsValueConstantInt(old)) {
         InterestingIntegers.insert(old);
       }
-      Solver.add(oldExpr == Ctx.int_const(TI));
+      Results.push_back(oldExpr == Ctx.int_const(TI));
       InterestingIntegers.erase(TI);
     } else if (auto *PTII = dyn_cast<llvm::PtrToIntInst>(I)) {
       if (!InterestingIntegers.contains(PTII)) {
@@ -203,7 +203,7 @@ SolverResult AnalyzeCB(Z3ConstraintSolver &Ctx, const CallBase *CB,
       }
       const auto *old = PTII->getOperand(0);
       const auto oldExpr = Ctx.ptr_const(old);
-      Solver.add(Ctx.addr(oldExpr) == Ctx.int_const(PTII));
+      Results.push_back(Ctx.addr(oldExpr) == Ctx.int_const(PTII));
       InterestingIntegers.erase(PTII);
       InterestingPtrs.insert(old);
     } else if (auto *CI = dyn_cast<llvm::CallInst>(I)) {
@@ -218,8 +218,25 @@ SolverResult AnalyzeCB(Z3ConstraintSolver &Ctx, const CallBase *CB,
         }
         const auto *old = CI->getOperand(0);
         const auto oldExpr = Ctx.ptr_const(old);
-        Solver.add(Ctx.length(oldExpr) == Ctx.int_const(CI));
+        Results.push_back(Ctx.length(oldExpr) == Ctx.int_const(CI));
         InterestingIntegers.erase(CI);
+        InterestingPtrs.insert(old);
+        continue;
+      } else if (Fn->getName() == "strchr") {
+        if (!InterestingPtrs.contains(CI)) {
+          continue;
+        }
+        const auto *old = CI->getOperand(0);
+        const auto oldExpr = Ctx.ptr_const(old);
+        const auto outExpr = Ctx.ptr_const(CI);
+        const auto delta = Ctx.free_int_const();
+        Results.push_back((delta >= 0 && delta < Ctx.length(oldExpr) &&
+                          Ctx.addr(outExpr) == Ctx.addr(oldExpr) + delta &&
+                          Ctx.length(outExpr) == Ctx.length(oldExpr) - delta &&
+                          Ctx.capacity(outExpr) == Ctx.capacity(oldExpr) - delta)
+                          || Ctx.addr(outExpr) == Ctx.int_const(uint64_t(0)) &&
+                          Ctx.capacity(outExpr) == Ctx.int_const(uint64_t(0)));
+        InterestingPtrs.erase(CI);
         InterestingPtrs.insert(old);
         continue;
       }
@@ -227,20 +244,70 @@ SolverResult AnalyzeCB(Z3ConstraintSolver &Ctx, const CallBase *CB,
         I->dump();
         todo();
       }
+    } else if (auto *PHI = dyn_cast<llvm::PHINode>(I)) {
+      return std::make_pair(Results, PHI);
+    } else if (auto *BI = dyn_cast<llvm::BranchInst>(I)) {
+      if (dominance_info == std::nullopt) {
+        continue;
+      }
+      const auto taken_expr = join_all(dominance_info->taken_exprs, Ctx);
+      const auto not_taken_expr =
+          join_all(dominance_info->not_taken_exprs, Ctx);
+      const auto *cond = BI->getOperand(0);
+      const auto condExpr = Ctx.bool_const(cond);
+      Results.push_back(implies(condExpr, taken_expr));
+      Results.push_back(implies(!condExpr, Ctx.bool_const(true)));
+      InterestingBooleans.insert(cond);
+    } else if (auto *ICmpI = dyn_cast<llvm::ICmpInst>(I)) {
+      if (!InterestingBooleans.contains(ICmpI)) {
+        continue;
+      }
+      const bool isPtrCmp = ICmpI->getOperand(0)->getType()->isPointerTy();
+      const auto *left = ICmpI->getOperand(0);
+      const auto leftExpr =
+          isPtrCmp ? Ctx.ptr_const(left) : Ctx.int_const(left);
+      const auto *right = ICmpI->getOperand(1);
+      const auto rightExpr =
+          isPtrCmp ? Ctx.ptr_const(right) : Ctx.int_const(right);
+      const auto &ICmpIExpr = Ctx.bool_const(ICmpI);
+      if (!IsValueConstantInt(left)) {
+        if (isPtrCmp) {
+          InterestingPtrs.insert(left);
+        } else {
+          InterestingIntegers.insert(left);
+        }
+      }
+      if (!IsValueConstantInt(right)) {
+        if (isPtrCmp) {
+          InterestingPtrs.insert(right);
+        } else {
+          InterestingIntegers.insert(right);
+        }
+      }
+      Results.push_back(ICmpIExpr ==
+                        (isPtrCmp ? (Ctx.addr(leftExpr) == Ctx.addr(rightExpr))
+                                  : (leftExpr == rightExpr)));
+      InterestingBooleans.erase(ICmpI);
     } else {
-      if (InterestingIntegers.contains(I) || InterestingPtrs.contains(I)) {
+      if (InterestingIntegers.contains(I) || InterestingPtrs.contains(I) ||
+          InterestingBooleans.contains(I)) {
         I->dump();
         todo();
       }
     }
   }
+  return std::make_pair(Results, nullptr);
+}
 
+SolverResult SolveConstraints(Z3ConstraintSolver &Ctx, solver &Solver,
+                              const Value *InitialPtr,
+                              const Value *InitialInteger) {
   SolverResult result;
-  llvm::errs() << Solver.to_smt2() << '\n';
   Solver.push();
   Solver.add(Ctx.capacity(Ctx.ptr_const(InitialPtr)) !=
              Ctx.int_const(InitialInteger));
   result.IsCapacity = Solver.check() == unsat;
+  llvm::errs() << Solver.to_smt2() << '\n';
   Solver.pop();
 
   Solver.push();
@@ -266,6 +333,77 @@ SolverResult AnalyzeCB(Z3ConstraintSolver &Ctx, const CallBase *CB,
   llvm::outs() << "IsLength: " << result.IsLength << '\n';
   llvm::outs() << "LeqLength: " << result.LeqLength << '\n';
   return result;
+}
+
+SolverResult AnalyzeCB(Z3ConstraintSolver &Ctx, const CallBase *CB,
+                       unsigned PtrIndex, unsigned IntegerIndex) {
+  assert(CB != nullptr);
+#ifndef NDEBUG
+  llvm::errs() << "[PointerDefResolution] AnalyzeCB: " << CB->getName() << "\n";
+  llvm::errs() << "[PointerDefResolution] AnalyzeCB: ";
+  CB->dump();
+#endif
+  solver &Solver = Ctx.solver;
+  const Value *InitialPtr = CB->getOperand(PtrIndex);
+  const Value *InitialInteger = CB->getOperand(IntegerIndex);
+  DenseSet<const Value *> InterestingPtrs;
+  DenseSet<const Value *> InterestingIntegers;
+  InterestingPtrs.insert(InitialPtr);
+  InterestingIntegers.insert(InitialInteger);
+  // auto DominatorBBLastInst = CB;
+  {
+    const auto [constraints, phi] =
+        AnalyzeBB(Ctx, CB->getPrevNonDebugInstruction(), InterestingPtrs,
+                  InterestingIntegers, std::nullopt);
+    for (const auto &e : constraints) {
+      Solver.add(e);
+    }
+    auto result = SolveConstraints(Ctx, Solver, InitialPtr, InitialInteger);
+    if (result.IsCapacity || result.IsLength || result.LeqCapacity ||
+        result.LeqLength) {
+      return result;
+    }
+    const auto bb0 = phi->getIncomingBlock(0);
+    const auto bb1 = phi->getIncomingBlock(1);
+    if (bb0->getUniquePredecessor() == nullptr ||
+        bb1->getUniquePredecessor() == nullptr ||
+        bb0->getUniquePredecessor() != bb1->getUniquePredecessor()) {
+      todo();
+    }
+    const auto dom = bb0->getUniquePredecessor();
+    InterestingIntegers.insert(phi->getIncomingValue(0));
+    InterestingIntegers.insert(phi->getIncomingValue(1));
+    auto [bb0_constraints, bb0_phi] =
+        AnalyzeBB(Ctx, &*bb0->rbegin(), InterestingPtrs, InterestingIntegers,
+                  std::nullopt);
+    bb0_constraints.push_back(Ctx.int_const(phi) == Ctx.int_const(phi->getIncomingValue(0)));
+    if (bb0_phi != nullptr) {
+      todo();
+    }
+    auto [bb1_constraints, bb1_phi] =
+        AnalyzeBB(Ctx, &*bb1->rbegin(), InterestingPtrs, InterestingIntegers,
+                  std::nullopt);
+    bb1_constraints.push_back(Ctx.int_const(phi) == Ctx.int_const(phi->getIncomingValue(1)));
+    if (bb1_phi != nullptr) {
+      todo();
+    }
+    const DominanceInfo di{
+        bb0_constraints,
+        bb1_constraints,
+    };
+    const auto [dom_constraints, dom_phi] = AnalyzeBB(
+        Ctx, &*dom->rbegin(), InterestingPtrs, InterestingIntegers, di);
+    for (const auto &e : dom_constraints) {
+      Solver.add(e);
+    }
+    result = SolveConstraints(Ctx, Solver, InitialPtr, InitialInteger);
+    if (result.IsCapacity || result.IsLength || result.LeqCapacity ||
+        result.LeqLength) {
+      return result;
+    }
+    todo();
+  }
+  todo();
 }
 
 void PointerDefResolution::PointerPropertyCheck(
@@ -350,6 +488,7 @@ PointerDefResolution::PointerDefResolution(const CallGraph &CG,
         for (auto i : PI.IntegerIndices) {
           Z3ConstraintSolver cs;
           PointerPropertyCheck(cs, RCG, Caller, PS, ptr, i, depth);
+          return;
         }
       }
     }

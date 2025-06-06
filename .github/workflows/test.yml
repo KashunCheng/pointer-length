@@ -15,7 +15,7 @@ on:
 jobs:
   # Build job
   build:
-    runs-on: ubuntu-latest
+    runs-on: nix-latest
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@main

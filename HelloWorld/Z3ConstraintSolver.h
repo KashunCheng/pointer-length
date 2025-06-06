@@ -23,10 +23,13 @@ public:
 
 private:
   func_decl_vector ptr_proj;
+  int id = 0;
   sort ptr_sort;
+  DenseMap<int, string> free_expr_names;
   DenseMap<const Value *, string> expr_names;
   DenseMap<const Value *, expr> ptr_to_expr;
   DenseMap<const Value *, expr> integer_to_expr;
+  DenseMap<const Value *, expr> bool_to_expr;
 
   [[nodiscard]] const char *value_name(const Value *value) {
     assert(value != nullptr);
@@ -57,11 +60,34 @@ public:
     return it->second;
   }
 
-  expr int_const(const uint64_t value) {
-    return context.int_val(value);
+  expr int_const(const uint64_t value) { return context.int_val(value); }
+
+  expr free_int_const() {
+    auto [fst, _] = free_expr_names.insert(
+        std::make_pair(id, llvm::formatv("{}", id).str()));
+    ++id;
+    return context.int_const(fst->second.c_str());
   }
 
-  // [[nodiscard]] expr int_val(const int value) { return context.int_val(value); }
+  expr bool_const(const Value *value) {
+    assert(value != nullptr);
+    if (const auto CI = dyn_cast<llvm::ConstantInt>(value)) {
+      // assert(CI->getBitWidth() <= 32);
+      return context.bool_val(CI->getZExtValue());
+    }
+    const auto it = bool_to_expr.find(value);
+    if (it == bool_to_expr.end()) {
+      auto expr = context.bool_val(value_name(value));
+      bool_to_expr.insert(std::make_pair(value, expr));
+      return expr;
+    }
+    return it->second;
+  }
+
+  expr bool_const(const bool value) { return context.bool_val(value); }
+
+  // [[nodiscard]] expr int_val(const int value) { return
+  // context.int_val(value); }
 
   expr ptr_const(const Value *value) {
     const auto it = ptr_to_expr.find(value);
@@ -71,6 +97,10 @@ public:
       solver.add(context.int_val(0) <= addr(expr));
       solver.add(0 <= length(expr));
       solver.add(length(expr) <= capacity(expr));
+      if (const auto CI = dyn_cast<llvm::ConstantPointerNull>(value)) {
+        solver.add(addr(expr) == context.int_val(0));
+        solver.add(capacity(expr) == context.int_val(0));
+      }
       return expr;
     }
     return it->second;
