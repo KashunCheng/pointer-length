@@ -19,7 +19,7 @@ using std::string;
 class Z3ConstraintSolver {
 
 public:
-  context context;
+  z3::context context;
 
 private:
   func_decl_vector ptr_proj;
@@ -42,7 +42,7 @@ private:
   }
 
 public:
-  solver solver;
+  z3::solver solver;
 
   explicit Z3ConstraintSolver();
   expr int_const(const Value *value) {

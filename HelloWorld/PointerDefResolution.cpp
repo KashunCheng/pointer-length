@@ -428,7 +428,7 @@ void PointerDefResolution::PointerPropertyCheck(
                << Callee->getName() << "\n";
 #endif
   // Visited.insert(Caller);
-  const auto CallerSelfContained = std::reduce(
+  const auto CallerSelfContained = std::accumulate(
       Caller->begin(), Caller->end(), true,
       [Callee, CallArgsPtrIdx, CallArgsIntegerIdx,
        &CS](bool acc, const CallGraphNode::CallRecord &arg) {
